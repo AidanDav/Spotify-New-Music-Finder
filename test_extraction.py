@@ -1,8 +1,12 @@
 import ollama
 import json
+import os
 import requests
+from dotenv import load_dotenv
 
-LASTFM_API_KEY = "YOUR API KEY HERE"
+load_dotenv()
+
+LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 
 def extract_query(user_message):
     extraction_prompt = f"""Determine whether this user request is asking for similar SONGS or similar ARTISTS, then extract the relevant details.
@@ -38,7 +42,7 @@ For artists: {{"type": "artist", "artist": "artist name here"}}"""
         return None
 
 
-
+#Function to get similar artists from Last.fm API
 def get_similar_artists(artist_name, limit=10):
     url = "https://ws.audioscrobbler.com/2.0/"
     params = {
@@ -51,6 +55,7 @@ def get_similar_artists(artist_name, limit=10):
     response = requests.get(url, params=params)
     return response.json()
 
+#Function to get similar songs from Last.fm API
 def get_similar_songs(track_name, artist_name, limit=10):
     url = "https://ws.audioscrobbler.com/2.0/"
     params = {
@@ -65,8 +70,25 @@ def get_similar_songs(track_name, artist_name, limit=10):
     response = requests.get(url, params=params)
     return response.json()
 
+#Asks Mistral to present a list of songs/artists in a friendly, human way (no similarity scores)
+def format_results_with_mistral(mode, names):
+    names_text = "\n".join(names)
+    kind = "songs" if mode == "song" else "artists"
+
+    format_prompt = f"""Here is a list of {kind}:
+{names_text}
+
+Present this list to the user in a friendly, conversational way, listing each one out clearly (e.g. as a bulleted list). Do not mention similarity scores, rankings, or add any extra commentary beyond the list itself."""
+
+    response = ollama.chat(
+        model='mistral',
+        messages=[{'role': 'user', 'content': format_prompt}]
+    )
+    return response['message']['content'].strip()
+
 if __name__ == "__main__":
     while True:
+        #Initial prompt for user to enter their query, with option to quit the program
         user_input = input("\nWhat are you looking for? (or type 'quit')\n> ")
 
         if user_input.lower() == "quit":
@@ -77,14 +99,16 @@ if __name__ == "__main__":
         if not result:
             print("Couldn't extract info, try rephrasing.")
             continue
-
+        #gets the prompt for the user input and checks if it is a song or an artist, then calls the 
+        # appropriate function to get similar songs or artists from Last.fm
         if result["type"] == "song":
             ans = get_similar_songs(result["song"], result["artist"], limit=5)
             if "error" in ans:
                 print(f"Error: {ans['message']}")
             else:
-                for track in ans.get("similartracks", {}).get("track", []):
-                    print(f"  - {track['name']} by {track['artist']['name']} (similarity: {track['match']})")
+                tracks = ans.get("similartracks", {}).get("track", [])
+                names = [f"{track['name']} by {track['artist']['name']}" for track in tracks]
+                print(format_results_with_mistral("song", names))
         elif result["type"] == "artist":
             #We get the similar artists from Last.fm
             ans = get_similar_artists(result["artist"], limit=5)
@@ -93,9 +117,7 @@ if __name__ == "__main__":
                 print(f"Couldn't find similar artists for '{result['artist']}' (Last.fm error: {ans['message']}).")
             #If no error, we are able to print out similar artists
             else:
-                print(f"[ARTIST mode] Similar artists to '{result['artist']}':")
-                for artist in ans["similarartists"]["artist"]:
-                    #Prints the artists and the similarity score to the user in a readable format
-                    print(f"  - {artist['name']} (similarity: {artist['match']})")
+                names = [artist['name'] for artist in ans["similarartists"]["artist"]]
+                print(format_results_with_mistral("artist", names))
         else:
             print(f"Unrecognized type: {result}")

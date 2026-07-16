@@ -12,7 +12,10 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     scope="user-modify-playback-state user-read-playback-state"
 ))
 
-query = "Kickstart my heart by Mötley Crüe"
+track_name = "Stop Sign"
+artist_name = "DICE"
+query = f'track:"{track_name}" artist:"{artist_name}"'
+
 results = sp.search(q=query, type="track", limit=1)
 tracks = results['tracks']['items']
 

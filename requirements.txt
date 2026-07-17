@@ -1,0 +1,6 @@
+ollama
+spotipy
+requests
+python-dotenv
+langchain
+langchain-ollama

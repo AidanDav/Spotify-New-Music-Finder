@@ -1,5 +1,5 @@
-from mistral_client import extract_query
-from lastfm_client import get_similar_songs, get_similar_artists, get_artist_top_tracks
+from lastfm_agent import build_agent, _last_results
+from lastfm_client import get_artist_top_tracks
 from spotify_client import search_track, queue_track
 from parsing import parse_selection
 
@@ -9,60 +9,48 @@ INTRO_TEXT = {
     "top_tracks": "Here are {count} popular songs from that artist. Want me to queue any?",
 }
 
+# Built once at import — rebuilding per query would be wasteful.
+_agent = build_agent()
 
+
+# Displays a list to the user with a friendly intro. list_type is a key in
+# INTRO_TEXT, display is the list of strings to show.
 def show_list(list_type, display):
     print("\n" + INTRO_TEXT[list_type].format(count=len(display)))
     for i, name in enumerate(display, 1):
         print(f"  {i}. {name}")
 
 
+# Returns (display, targets, data) for a list of Last.fm track dicts.
 def build_song_list(tracks):
-    """Returns (display, targets, track_data) for a list of Last.fm track dicts."""
     display = [f"{t['name']} by {t['artist']['name']}" for t in tracks]
     targets = [t["name"] for t in tracks]
     data = [{"name": t["name"], "artist": t["artist"]["name"]} for t in tracks]
     return display, targets, data
 
 
+# Steps 2-4, routed through the LangChain agent. The agent's prose answer is
+# discarded — _last_results is the source of truth, since the model reworded
+# tool output ("proxie" -> "Proxie") in testing.
+# Returns (list_type, display, targets, data) or (None, error, None, None).
 def handle_query(user_input):
-    """Steps 2-4. Returns (list_type, display, targets, data) or (None, error, None, None)."""
-    result = extract_query(user_input)
-    if not result or "type" not in result:
+    _last_results.clear()
+    _agent.invoke({"messages": [{"role": "user", "content": user_input}]})
+
+    if not _last_results.get("type"):
         return None, "Sorry, I couldn't understand that. Try rephrasing?", None, None
 
-    if result["type"] == "song":
-        artist = result.get("artist", "")
-        if not artist:
-            return None, "I need an artist name to find similar songs.", None, None
-
-        resp = get_similar_songs(result["song"], artist, limit=5)
-        if "error" in resp:
-            return None, f"Last.fm: {resp['message']}", None, None
-
-        tracks = resp.get("similartracks", {}).get("track", [])
-        if not tracks:
-            return None, "No similar tracks found.", None, None
-
-        display, targets, data = build_song_list(tracks)
-        return "similar_songs", display, targets, data
-
-    elif result["type"] == "artist":
-        resp = get_similar_artists(result["artist"], limit=5)
-        if "error" in resp:
-            return None, f"Last.fm: {resp['message']}", None, None
-
-        artists = resp.get("similarartists", {}).get("artist", [])
-        if not artists:
-            return None, "No similar artists found.", None, None
-
-        names = [a["name"] for a in artists]
-        return "similar_artists", names, None, names
-
-    return None, f"Unknown type: {result}", None, None
+    return (
+        _last_results["type"],
+        _last_results["display"],
+        _last_results["targets"],
+        _last_results["data"],
+    )
 
 
+# Pulls from spotipy to queue the selected songs. selected is a list of
+# {"name", "artist"} dicts.
 def queue_songs(selected):
-    """Step 7. selected is a list of {"name", "artist"} dicts."""
     for song in selected:
         track = search_track(song["name"], song["artist"])
         if not track:
@@ -73,8 +61,10 @@ def queue_songs(selected):
             print(f"  Queued: {track['name']} by {track['artists'][0]['name']}")
 
 
+# Step 5's second hop: artist -> their top tracks. Called directly rather than
+# through the agent — a selection isn't a natural-language query.
+# Returns (display, targets, data) or (None, None, None) on failure.
 def expand_artist(artist_name):
-    """Step 5's second hop: artist -> their top tracks."""
     resp = get_artist_top_tracks(artist_name, limit=5)
     if "error" in resp:
         print(f"Last.fm: {resp['message']}")
@@ -88,6 +78,8 @@ def expand_artist(artist_name):
     return build_song_list(tracks)
 
 
+# Main loop: tracks which list is currently on screen and routes input as
+# either a new search or a selection from that list.
 def main():
     print("How may I assist you in finding similar artists or songs?")
     print("(type 'quit' to exit, 'new' to start a fresh search)")
@@ -119,9 +111,21 @@ def main():
             show_list(current_type, current_display)
             continue
 
-        # A list is on screen -> treat input as a selection
+        # A list is on screen -> try selection first
         indices, error = parse_selection(user_input, current_display, match_targets=current_targets)
+
         if error:
+            # Might be a new search rather than a bad selection
+            looks_like_search = len(user_input.split()) >= 3
+            if looks_like_search:
+                list_type, display, targets, data = handle_query(user_input)
+                if list_type is not None:
+                    current_type, current_display, current_targets, current_data = list_type, display, targets, data
+                    show_list(current_type, current_display)
+                    continue
+                print(f"[retry failed] {display}")
+                continue
+
             print(error)
             continue
 

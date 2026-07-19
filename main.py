@@ -2,6 +2,8 @@ from lastfm_agent import build_agent, _last_results
 from lastfm_client import get_artist_top_tracks
 from spotify_client import search_track, queue_track
 from parsing import parse_selection
+from feedback_parser import parse_feedback
+from database import init_db, log_feedback, filter_disliked
 
 INTRO_TEXT = {
     "similar_songs": "Here are {count} songs you might like. Want me to queue any? Name or number works.",
@@ -21,15 +23,19 @@ def show_list(list_type, display):
         print(f"  {i}. {name}")
 
 
-# Returns (display, targets, data) for a list of Last.fm track dicts.
+# Returns (display, targets, data) for a list of Last.fm track dicts,
+# with any most-recently-disliked tracks filtered out first. This is the
+# non-agent path (expand_artist), so it needs its own filtering — the
+# agent tools in lastfm_agent.py filter independently on their side.
 def build_song_list(tracks):
-    display = [f"{t['name']} by {t['artist']['name']}" for t in tracks]
-    targets = [t["name"] for t in tracks]
     data = [{"name": t["name"], "artist": t["artist"]["name"]} for t in tracks]
+    data = filter_disliked(data)
+    display = [f"{d['name']} by {d['artist']}" for d in data]
+    targets = [d["name"] for d in data]
     return display, targets, data
 
 
-# Steps 2-4, routed through the LangChain agent. The agent's prose answer is
+# Handle query routed through the LangChain agent. The agent's prose answer is
 # discarded — _last_results is the source of truth, since the model reworded
 # tool output ("proxie" -> "Proxie") in testing.
 # Returns (list_type, display, targets, data) or (None, error, None, None).
@@ -50,7 +56,12 @@ def handle_query(user_input):
 
 # Pulls from spotipy to queue the selected songs. selected is a list of
 # {"name", "artist"} dicts.
+# Returns only the songs that were actually found and queued — this is
+# what feedback should be collected on, not the full original selection,
+# since a song that failed to queue was never played.
 def queue_songs(selected):
+    queued = []
+
     for song in selected:
         track = search_track(song["name"], song["artist"])
         if not track:
@@ -58,10 +69,48 @@ def queue_songs(selected):
             continue
 
         if queue_track(track["uri"]):
-            print(f"  Queued: {track['name']} by {track['artists'][0]['name']}")
+            queued_name = track["name"]
+            queued_artist = track["artists"][0]["name"]
+            print(f"  Queued: {queued_name} by {queued_artist}")
+            queued.append({"name": queued_name, "artist": queued_artist})
+
+    return queued
 
 
-# Step 5's second hop: artist -> their top tracks. Called directly rather than
+# Ask for per-song feedback on whatever actually got queued, parse
+# it (deterministic first, LLM fallback for the leftovers), and persist
+# whatever was understood. source_type records where these songs came
+# from (e.g. "similar_songs", "top_tracks") for future recommendation use.
+def collect_feedback(queued, source_type):
+    if not queued:
+        return
+
+    targets = [f"{song['name']} by {song['artist']}" for song in queued]
+
+    print("\nHow were these?")
+    for i, target in enumerate(targets, 1):
+        print(f"  {i}. {target}")
+
+    feedback_input = input("> ").strip()
+
+    # Treat a blank answer or an explicit skip as declining to give
+    # feedback at all — not as "disliked everything".
+    if not feedback_input or feedback_input.lower() in ("skip", "no", "n/a", "none"):
+        return
+
+    verdicts = parse_feedback(feedback_input, targets)
+
+    for i, song in enumerate(queued):
+        target = targets[i]
+        opinion = verdicts.get(i)
+        if opinion:
+            log_feedback(song["name"], song["artist"], opinion, source_type=source_type)
+            print(f"  Logged: {target} — {opinion}")
+        else:
+            print(f"  Not sure how you felt about {target} — skipping")
+
+
+# Artist -> their top tracks. Called directly rather than
 # through the agent — a selection isn't a natural-language query.
 # Returns (display, targets, data) or (None, None, None) on failure.
 def expand_artist(artist_name):
@@ -75,12 +124,19 @@ def expand_artist(artist_name):
         print(f"No top tracks found for {artist_name}.")
         return None, None, None
 
-    return build_song_list(tracks)
+    display, targets, data = build_song_list(tracks)
+    if not display:
+        print(f"No top tracks found for {artist_name} (results were filtered out based on past dislikes).")
+        return None, None, None
+
+    return display, targets, data
 
 
 # Main loop: tracks which list is currently on screen and routes input as
 # either a new search or a selection from that list.
 def main():
+    init_db()
+
     print("How may I assist you in finding similar artists or songs?")
     print("(type 'quit' to exit, 'new' to start a fresh search)")
 
@@ -144,7 +200,8 @@ def main():
 
         else:  # similar_songs or top_tracks -> queue them
             selected = [current_data[i] for i in indices]
-            queue_songs(selected)
+            queued = queue_songs(selected)
+            collect_feedback(queued, source_type=current_type)
 
 
 if __name__ == "__main__":

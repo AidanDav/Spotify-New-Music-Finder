@@ -7,17 +7,19 @@ from lastfm_client import (
     get_similar_songs as _get_similar_songs_raw,
     get_artist_top_tracks as _get_artist_top_tracks_raw,
 )
+from database import filter_disliked
 
 _last_results = {}
 
-
+# Built once at import — same reasoning as the feedback_parser.py LLM.
 def _stash(list_type, data, display, targets=None):
     _last_results["type"] = list_type
     _last_results["data"] = data
     _last_results["display"] = display
     _last_results["targets"] = targets
 
-
+# functions below are decorated with @tool so the agent can call them. They stash their results in _last_results 
+# for later retrieval by main.py, and return a string to the agent for display to the user.
 @tool
 def get_similar_artists(artist_name: str) -> str:
     """Find OTHER artists who sound similar to a given artist. Returns a list of
@@ -36,7 +38,8 @@ def get_similar_artists(artist_name: str) -> str:
     _stash("similar_artists", names, names, None)
     return "\n".join(f"{i}. {n}" for i, n in enumerate(names, 1))
 
-
+# The following two functions are similar to get_similar_artists, but for songs and top tracks. 
+# They also filter out disliked songs before stashing the results.
 @tool
 def get_similar_songs(track_name: str, artist_name: str) -> str:
     """Find songs that sound similar to one specific song. Requires BOTH the song
@@ -52,11 +55,16 @@ def get_similar_songs(track_name: str, artist_name: str) -> str:
         return f"No similar songs found for '{track_name}' by {artist_name}."
 
     data = [{"name": t["name"], "artist": t["artist"]["name"]} for t in tracks]
+    data = filter_disliked(data)
+    if not data:
+        return f"No similar songs found for '{track_name}' by {artist_name} (results were filtered out based on past dislikes)."
+
     display = [f"{d['name']} by {d['artist']}" for d in data]
     _stash("similar_songs", data, display, [d["name"] for d in data])
     return "\n".join(f"{i}. {d}" for i, d in enumerate(display, 1))
 
-
+# The get_artist_top_tracks function retrieves the most popular songs by a specific artist. 
+# It filters out disliked songs and stashes the results for later retrieval.
 @tool
 def get_artist_top_tracks(artist_name: str) -> str:
     """Get the most popular songs BY a specific artist. Returns that artist's own
@@ -72,11 +80,16 @@ def get_artist_top_tracks(artist_name: str) -> str:
         return f"No top tracks found for {artist_name}."
 
     data = [{"name": t["name"], "artist": t["artist"]["name"]} for t in tracks]
+    data = filter_disliked(data)
+    if not data:
+        return f"No top tracks found for {artist_name} (results were filtered out based on past dislikes)."
+
     display = [f"{d['name']} by {d['artist']}" for d in data]
     _stash("top_tracks", data, display, [d["name"] for d in data])
     return "\n".join(f"{i}. {d}" for i, d in enumerate(display, 1))
 
-
+# The build_agent function creates an agent that uses the ChatOllama model Qwen2.5 
+# and the three tool functions defined above.
 def build_agent():
     llm = ChatOllama(model="qwen2.5")
     return create_agent(

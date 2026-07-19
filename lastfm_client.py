@@ -1,5 +1,6 @@
 import requests
 from config import LASTFM_API_KEY
+from database import filter_disliked_raw
 
 BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 
@@ -27,7 +28,7 @@ def get_similar_songs(track_name, artist_name, limit=10):
         "artist": artist_name,
         "api_key": LASTFM_API_KEY,
         "format": "json",
-        "limit": limit * 3,      # over-fetch to survive filtering
+        "limit": limit * 3,      # over-fetch to survive same-artist AND disliked filtering
         "autocorrect": 1
     }
     response = requests.get(BASE_URL, params=params)
@@ -38,12 +39,17 @@ def get_similar_songs(track_name, artist_name, limit=10):
 
     all_tracks = data.get("similartracks", {}).get("track", [])
 
-    filtered = [
+    same_artist_filtered = [
         t for t in all_tracks
         if t["artist"]["name"].strip().lower() != artist_name.strip().lower()
     ]
 
-    data["similartracks"]["track"] = filtered[:limit]
+    # Filtering disliked songs here, before the slice, means a dislike
+    # gets backfilled from the over-fetched buffer instead of just
+    # shrinking the final list.
+    not_disliked = filter_disliked_raw(same_artist_filtered)
+
+    data["similartracks"]["track"] = not_disliked[:limit]
     return data
 
 
@@ -54,7 +60,16 @@ def get_artist_top_tracks(artist_name, limit=10):
         "artist": artist_name,
         "api_key": LASTFM_API_KEY,
         "format": "json",
-        "limit": limit
+        "limit": limit * 3       # over-fetch to survive disliked filtering
     }
     response = requests.get(url, params=params)
-    return response.json()
+    data = response.json()
+
+    if "error" in data:
+        return data
+
+    all_tracks = data.get("toptracks", {}).get("track", [])
+    not_disliked = filter_disliked_raw(all_tracks)
+
+    data["toptracks"]["track"] = not_disliked[:limit]
+    return data

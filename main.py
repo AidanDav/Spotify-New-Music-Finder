@@ -1,6 +1,10 @@
+import threading
+from collections import deque
+
 from lastfm_agent import build_agent, _last_results
 from lastfm_client import get_artist_top_tracks
 from spotify_client import search_track, queue_track
+from playback_poller import PlaybackPoller
 from parsing import parse_selection
 from feedback_parser import parse_feedback
 from database import init_db, log_feedback, filter_disliked
@@ -13,6 +17,45 @@ INTRO_TEXT = {
 
 # Built once at import — rebuilding per query would be wasteful.
 _agent = build_agent()
+
+# ---------------------------------------------------------------------------
+# Playback polling wiring
+# ---------------------------------------------------------------------------
+# The poller runs on its own thread and has no way to safely call input()
+# itself (it'd race with the main thread's input() for the next command).
+# So callbacks just stash the event; the main loop drains it at the next
+# natural pause point and asks for feedback there, on the main thread.
+_pending_events = deque()
+_pending_lock = threading.Lock()
+
+
+def _on_track_finished(track_info):
+    with _pending_lock:
+        _pending_events.append(("finished", track_info))
+
+
+def _on_track_skipped(track_info):
+    with _pending_lock:
+        _pending_events.append(("skipped", track_info))
+
+
+_poller = PlaybackPoller(on_finished=_on_track_finished, on_skipped=_on_track_skipped)
+
+
+def _drain_playback_events():
+    """Report on and collect feedback for any tracks that finished or were
+    skipped since the last time this was checked. source_type travels with
+    each track's watch() metadata, so this doesn't depend on whatever list
+    happens to be on screen right now — the user may have moved on to a
+    totally different search since the track was queued."""
+    with _pending_lock:
+        events = list(_pending_events)
+        _pending_events.clear()
+
+    for event, track_info in events:
+        verb = "finished playing" if event == "finished" else "was skipped"
+        print(f"\n\U0001F3B5 '{track_info['name']}' by {track_info['artist']} {verb}.")
+        collect_feedback([track_info], source_type=track_info.get("source_type"))
 
 
 # Displays a list to the user with a friendly intro. list_type is a key in
@@ -54,12 +97,14 @@ def handle_query(user_input):
     )
 
 
-# Pulls from spotipy to queue the selected songs. selected is a list of
-# {"name", "artist"} dicts.
-# Returns only the songs that were actually found and queued — this is
-# what feedback should be collected on, not the full original selection,
-# since a song that failed to queue was never played.
-def queue_songs(selected):
+# Pulls from spotipy to queue the selected songs, then registers each
+# successfully-queued track with the poller so feedback gets asked once
+# it actually finishes or gets skipped — not right away, since queueing
+# a track doesn't mean the user has heard it yet.
+# selected is a list of {"name", "artist"} dicts. source_type travels
+# with each track so _drain_playback_events knows where it came from
+# later, even if the on-screen list has since changed.
+def queue_songs(selected, source_type):
     queued = []
 
     for song in selected:
@@ -73,21 +118,31 @@ def queue_songs(selected):
             queued_artist = track["artists"][0]["name"]
             print(f"  Queued: {queued_name} by {queued_artist}")
             queued.append({"name": queued_name, "artist": queued_artist})
+            _poller.watch(
+                track["uri"],
+                name=queued_name,
+                artist=queued_artist,
+                source_type=source_type,
+            )
+
+    if queued:
+        _poller.start()  # no-op if already running
 
     return queued
 
 
-# Ask for per-song feedback on whatever actually got queued, parse
-# it (deterministic first, LLM fallback for the leftovers), and persist
-# whatever was understood. source_type records where these songs came
-# from (e.g. "similar_songs", "top_tracks") for future recommendation use.
+# Ask for per-song feedback on whatever actually finished or was skipped,
+# parse it (deterministic first, LLM fallback for the leftovers), and
+# persist whatever was understood. source_type records where these songs
+# came from (e.g. "similar_songs", "top_tracks") for future recommendation
+# use.
 def collect_feedback(queued, source_type):
     if not queued:
         return
 
     targets = [f"{song['name']} by {song['artist']}" for song in queued]
 
-    print("\nHow were these?")
+    print("How was it?" if len(targets) == 1 else "\nHow were these?")
     for i, target in enumerate(targets, 1):
         print(f"  {i}. {target}")
 
@@ -146,9 +201,15 @@ def main():
     current_data = None
 
     while True:
+        # Report on any tracks that finished/were skipped since the last
+        # prompt, before showing the next one — this is what makes
+        # feedback event-driven instead of "ask right after queueing".
+        _drain_playback_events()
+
         user_input = input("\n> ").strip()
 
         if user_input.lower() in ("quit", "exit"):
+            _poller.stop()
             break
 
         if user_input.lower() == "new":
@@ -200,8 +261,10 @@ def main():
 
         else:  # similar_songs or top_tracks -> queue them
             selected = [current_data[i] for i in indices]
-            queued = queue_songs(selected)
-            collect_feedback(queued, source_type=current_type)
+            queue_songs(selected, source_type=current_type)
+            # No collect_feedback() call here anymore — it now happens
+            # in _drain_playback_events() once these tracks actually
+            # finish or get skipped.
 
 
 if __name__ == "__main__":

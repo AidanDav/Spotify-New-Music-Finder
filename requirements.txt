@@ -4,3 +4,4 @@ requests
 python-dotenv
 langchain
 langchain-ollama
+streamlit>=1.37

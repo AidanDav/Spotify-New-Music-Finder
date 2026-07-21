@@ -7,7 +7,7 @@ from lastfm_client import (
     get_similar_songs as _get_similar_songs_raw,
     get_artist_top_tracks as _get_artist_top_tracks_raw,
 )
-from database import filter_disliked
+from database import filter_disliked, get_liked_songs as _get_liked_songs_raw
 
 _last_results = {}
 
@@ -88,13 +88,39 @@ def get_artist_top_tracks(artist_name: str) -> str:
     _stash("top_tracks", data, display, [d["name"] for d in data])
     return "\n".join(f"{i}. {d}" for i, d in enumerate(display, 1))
 
+# Surfaces the user's OWN feedback history rather than calling out to
+# Last.fm/Spotify — this is the one tool that reads from the local
+# database instead of an external API. Deliberately does NOT run
+# filter_disliked on its results: these songs are already known-liked by
+# definition, so there's nothing to filter.
+@tool
+def get_liked_songs() -> str:
+    """Show the user's own previously liked songs — the ones they gave
+    positive (thumbs-up) feedback on after listening. Use this when the
+    user asks to see their liked songs, their favorites, or what they've
+    liked so far. Do NOT use this to discover new music or find songs by
+    an artist — it only returns songs already in the user's feedback
+    history, not new recommendations."""
+    songs = _get_liked_songs_raw()
+    if not songs:
+        return "You haven't liked any songs yet."
+
+    display = [f"{s['name']} by {s['artist']}" for s in songs]
+    _stash("liked_songs", songs, display, [s["name"] for s in songs])
+    return "\n".join(f"{i}. {d}" for i, d in enumerate(display, 1))
+
 # The build_agent function creates an agent that uses the ChatOllama model Qwen2.5 
-# and the three tool functions defined above.
+# and the tool functions defined above.
 def build_agent():
     llm = ChatOllama(model="qwen2.5")
     return create_agent(
         model=llm,
-        tools=[get_similar_artists, get_similar_songs, get_artist_top_tracks],
+        tools=[
+            get_similar_artists,
+            get_similar_songs,
+            get_artist_top_tracks,
+            get_liked_songs,
+        ],
         system_prompt=(
             "You help users discover music. Use the available tools to answer "
             "their requests. Report tool results exactly as returned — never "
@@ -112,6 +138,7 @@ if __name__ == "__main__":
         "songs similar to Stop Sign by DICE",
         "what are Radiohead's most popular songs",
         "find me artists similar to Joji",
+        "show me my liked songs",
     ]
 
     for case in cases:

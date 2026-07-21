@@ -68,7 +68,10 @@ _POSITIVE_PHRASES = [
 # clause stays grouped under a single sentiment.
 _CLAUSE_SPLIT = re.compile(r'\s*(?:,|;|\bbut\b|\.)\s*')
 
-
+# Valid opinions the deterministic parser can return. Anything else is
+# treated as "unclear" and left unresolved for the LLM to handle.
+# This was an earlier processing step before the LLM fallback was added, but it's still used to
+# filter out any "unclear" verdicts from the LLM's response.
 def _sentiment_of(clause_lower):
     """Return 'liked', 'disliked', or None (no clear signal in this clause)."""
     padded = f" {clause_lower} "
@@ -87,7 +90,12 @@ def _sentiment_of(clause_lower):
 
     return None
 
-
+# ---------------------------------------------------------------------------
+# Feedback parsing - deterministic keyword pass only
+# Not using the LLM at all, just keyword matching. Returns a dict of 0-based index -> "liked"/"disliked" 
+# for whatever it could confidently resolve. Was used as a first pass before the LLM fallback was added, 
+# but still used to filter out any "unclear" verdicts from the LLM's response.
+# ---------------------------------------------------------------------------
 def parse_feedback_deterministic(user_input, targets):
     """
     Per-song feedback parsing using keyword matching only.

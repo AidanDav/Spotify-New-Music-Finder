@@ -29,7 +29,9 @@ def get_similar_artists(artist_name: str) -> str:
 
     if "error" in resp:
         return f"Error: {resp['message']}"
-
+    # The function checks if the response contains an error. 
+    # If it does, it returns an error message to the user. 
+    # Otherwise, it proceeds to extract the list of similar artists from the response.
     artists = resp.get("similarartists", {}).get("artist", [])
     if not artists:
         return f"No similar artists found for {artist_name}."
@@ -78,7 +80,9 @@ def get_artist_top_tracks(artist_name: str) -> str:
     tracks = resp.get("toptracks", {}).get("track", [])
     if not tracks:
         return f"No top tracks found for {artist_name}."
-
+    # The function checks if the response contains an error.
+    # If it does, it returns an error message to the user. 
+    # Otherwise, it proceeds to extract the list of top tracks from the response.
     data = [{"name": t["name"], "artist": t["artist"]["name"]} for t in tracks]
     data = filter_disliked(data)
     if not data:
@@ -128,7 +132,7 @@ def build_agent():
         ),
     )
 
-
+# The main block at the end of the file is for testing the agent with a set of example cases.
 if __name__ == "__main__":
     agent = build_agent()
 

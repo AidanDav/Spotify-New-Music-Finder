@@ -52,7 +52,8 @@ def get_similar_songs(track_name, artist_name, limit=10):
     data["similartracks"]["track"] = not_disliked[:limit]
     return data
 
-
+# Function to get top tracks of an artist from Last.fm API with artist.gettoptracks method
+# Set initial limit to 10, can be changed by passing limit parameter
 def get_artist_top_tracks(artist_name, limit=10):
     url = "https://ws.audioscrobbler.com/2.0/"
     params = {

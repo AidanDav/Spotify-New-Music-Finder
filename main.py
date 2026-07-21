@@ -41,7 +41,7 @@ def _on_track_skipped(track_info):
 
 _poller = PlaybackPoller(on_finished=_on_track_finished, on_skipped=_on_track_skipped)
 
-
+# Feedback event handling
 def _drain_playback_events():
     """Report on and collect feedback for any tracks that finished or were
     skipped since the last time this was checked. source_type travels with
